@@ -76,6 +76,7 @@
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
   <div class="badge"><span id="dot" class="dot"></span><span id="status">idle</span></div>
+  <div class="badge" id="micBadge" style="left:auto;right:8px;cursor:pointer;">🎤 on</div>
 </div>
 
 <div class="panel" id="setupPanel">
@@ -121,15 +122,81 @@ let running = false;
 let planRunning = false;
 let robotHost = '';
 
-// ---- Audio playback: Gemini streams raw 24kHz PCM16 mono chunks ----
-let audioCtx = null;
-let nextPlayTime = 0;
-const activeSources = [];
+// ---- Shared: simple linear resampler between sample rates ----
+function resampleFloat32(input, fromRate, toRate){
+  if (fromRate === toRate) return input;
+  const ratio = toRate / fromRate;
+  const outLength = Math.round(input.length * ratio);
+  const output = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const srcPos = i / ratio;
+    const i0 = Math.floor(srcPos);
+    const i1 = Math.min(i0 + 1, input.length - 1);
+    const frac = srcPos - i0;
+    output[i] = input[i0] * (1 - frac) + input[i1] * frac;
+  }
+  return output;
+}
 
-function initAudio(){
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+// ---- Audio engine: continuous mic capture (send) + continuous speech playback (receive) ----
+// Using a single continuous ScriptProcessor for playback (instead of scheduling one
+// AudioBufferSource per chunk) avoids the clicks/warping at chunk boundaries that
+// sound like slurred speech when chunks are played back-to-back individually.
+let audioCtx = null;
+let micProcessor = null;
+let playProcessor = null;
+let playQueue = [];       // Float32Array chunks awaiting playback, at audioCtx's sample rate
+let playQueueOffset = 0;
+let micEnabled = true;
+
+function initAudioEngine(stream){
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === 'suspended') audioCtx.resume();
-  nextPlayTime = audioCtx.currentTime;
+
+  // --- Playback path: dequeue resampled PCM continuously ---
+  playProcessor = audioCtx.createScriptProcessor(2048, 0, 1);
+  playProcessor.onaudioprocess = (e) => {
+    const out = e.outputBuffer.getChannelData(0);
+    let filled = 0;
+    while (filled < out.length && playQueue.length > 0) {
+      const chunk = playQueue[0];
+      const remaining = chunk.length - playQueueOffset;
+      const toCopy = Math.min(remaining, out.length - filled);
+      out.set(chunk.subarray(playQueueOffset, playQueueOffset + toCopy), filled);
+      filled += toCopy;
+      playQueueOffset += toCopy;
+      if (playQueueOffset >= chunk.length) { playQueue.shift(); playQueueOffset = 0; }
+    }
+    for (; filled < out.length; filled++) out[filled] = 0; // pad silence on underrun
+  };
+  playProcessor.connect(audioCtx.destination);
+
+  // --- Capture path: mic -> downsample to 16kHz PCM16 -> stream to Gemini ---
+  // Gemini's own voice-activity detection uses this continuous stream to know
+  // when you've started/finished talking — no button needed to "send" speech.
+  const micSource = audioCtx.createMediaStreamSource(stream);
+  micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  micProcessor.onaudioprocess = (e) => {
+    if (!micEnabled || !running || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const resampled = resampleFloat32(input, audioCtx.sampleRate, 16000);
+    const int16 = new Int16Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      const s = Math.max(-1, Math.min(1, resampled[i]));
+      int16[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+    const bytes = new Uint8Array(int16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    ws.send(JSON.stringify({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: btoa(binary) } } }));
+  };
+  micSource.connect(micProcessor);
+  // Route through a silent gain node: the processor must be connected to the graph
+  // to fire at all, but we don't want to echo your own mic back out the speaker.
+  const silentSink = audioCtx.createGain();
+  silentSink.gain.value = 0;
+  micProcessor.connect(silentSink);
+  silentSink.connect(audioCtx.destination);
 }
 
 function playAudioChunk(base64, sampleRate = 24000){
@@ -142,29 +209,13 @@ function playAudioChunk(base64, sampleRate = 24000){
   const pcm16 = new Int16Array(buf);
   const float32 = new Float32Array(pcm16.length);
   for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
-
-  const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
-  audioBuffer.copyToChannel(float32, 0);
-
-  const source = audioCtx.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(audioCtx.destination);
-
-  const startAt = Math.max(nextPlayTime, audioCtx.currentTime);
-  source.start(startAt);
-  nextPlayTime = startAt + audioBuffer.duration;
-
-  activeSources.push(source);
-  source.onended = () => {
-    const i = activeSources.indexOf(source);
-    if (i >= 0) activeSources.splice(i, 1);
-  };
+  playQueue.push(resampleFloat32(float32, sampleRate, audioCtx.sampleRate));
 }
 
 function stopAudioPlayback(){
-  // Gemini can interrupt itself (e.g. new frame changes its plan) — clear anything queued
-  while (activeSources.length) activeSources.pop().stop();
-  if (audioCtx) nextPlayTime = audioCtx.currentTime;
+  // Gemini can interrupt itself (e.g. you start talking) — clear anything queued
+  playQueue = [];
+  playQueueOffset = 0;
 }
 
 // ---- Function (tool) declaration Gemini calls: a full timed movement plan ----
@@ -241,18 +292,20 @@ async function start(){
   $('stopBtn').disabled = false;
   $('setupPanel').style.opacity = '0.5';
 
-  initAudio(); // must happen inside this click handler for mobile autoplay policies
-
-  // Camera
+  // Camera + microphone
+  let stream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: 640, height: 480 }, audio: false
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: 640, height: 480 },
+      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
     });
     video.srcObject = stream;
   } catch (e) {
-    log('Camera access failed: ' + e.message, 'err');
+    log('Camera/mic access failed: ' + e.message, 'err');
     return resetButtons();
   }
+
+  initAudioEngine(stream); // must happen inside this click handler for mobile autoplay policies
 
   setStatus('connecting…', false);
 
@@ -281,7 +334,10 @@ async function start(){
             `step and say you found it. Before calling execute_plan, briefly say out loud, in one short casual ` +
             `sentence, what you see and what you're about to do — like a friend narrating as they help you look, ` +
             `e.g. "I spot it near the top left, moving forward and turning right to reach it." Keep it brief, ` +
-            `you'll narrate again after each new frame.`
+            `you'll narrate again after each new frame. The user can also talk to you any time through the ` +
+            `microphone — respond to them conversationally and naturally, the way you would in a normal ` +
+            `voice conversation. If they give you a new instruction (e.g. "look on the left side instead" ` +
+            `or "stop" or "try a different object"), prioritize that over continuing the current search silently.`
           }]
         },
         tools: [{ functionDeclarations: toolDeclarations }]
@@ -393,7 +449,7 @@ function resetButtons(){
 function stopAll(){
   running = false;
   if (ws) ws.close();
-  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop()); // stops camera AND mic tracks
   stopAudioPlayback();
   sendStep('stop', 0);
   setStatus('idle', false);
@@ -403,6 +459,10 @@ function stopAll(){
 
 $('startBtn').addEventListener('click', start);
 $('stopBtn').addEventListener('click', stopAll);
+$('micBadge').addEventListener('click', () => {
+  micEnabled = !micEnabled;
+  $('micBadge').textContent = micEnabled ? '🎤 on' : '🎤 muted';
+});
 </script>
 </body>
 </html>
