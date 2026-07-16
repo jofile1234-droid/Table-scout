@@ -122,6 +122,50 @@ let running = false;
 let planRunning = false;
 let robotHost = '';
 
+// ---- Audio playback: Gemini streams raw 24kHz PCM16 mono chunks ----
+let audioCtx = null;
+let nextPlayTime = 0;
+const activeSources = [];
+
+function initAudio(){
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  nextPlayTime = audioCtx.currentTime;
+}
+
+function playAudioChunk(base64, sampleRate = 24000){
+  if (!audioCtx) return;
+  const bytes = atob(base64);
+  const buf = new ArrayBuffer(bytes.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) view[i] = bytes.charCodeAt(i);
+  const pcm16 = new Int16Array(buf);
+  const float32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
+
+  const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+  audioBuffer.copyToChannel(float32, 0);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+
+  const startAt = Math.max(nextPlayTime, audioCtx.currentTime);
+  source.start(startAt);
+  nextPlayTime = startAt + audioBuffer.duration;
+
+  activeSources.push(source);
+  source.onended = () => {
+    const i = activeSources.indexOf(source);
+    if (i >= 0) activeSources.splice(i, 1);
+  };
+}
+
+function stopAudioPlayback(){
+  // Gemini can interrupt itself (e.g. new frame changes its plan) — clear anything queued
+  while (activeSources.length) activeSources.pop().stop();
+  if (audioCtx) nextPlayTime = audioCtx.currentTime;
+}
+
 // ---- Function (tool) declaration Gemini calls: a full timed movement plan ----
 const toolDeclarations = [
   {
@@ -196,6 +240,8 @@ async function start(){
   $('stopBtn').disabled = false;
   $('setupPanel').style.opacity = '0.5';
 
+  initAudio(); // must happen inside this click handler for mobile autoplay policies
+
   // Camera
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -218,7 +264,8 @@ async function start(){
     ws.send(JSON.stringify({
       setup: {
         model: `models/${model}`,
-        generationConfig: { responseModalities: ['TEXT'] },
+        generationConfig: { responseModalities: ['AUDIO'] },
+        outputAudioTranscription: {},
         systemInstruction: {
           parts: [{ text:
             `You control a small two-wheeled robot. Its camera sits roughly at table height. ` +
@@ -230,7 +277,10 @@ async function start(){
             `Keep individual step durations under about 3 seconds so you don't overshoot — you'll see a ` +
             `fresh camera frame once the plan finishes and can issue a corrected plan then. If the target ` +
             `is already centered and close, call execute_plan with a single {action:"stop", duration_seconds:0} ` +
-            `step and say you found it.`
+            `step and say you found it. Before calling execute_plan, briefly say out loud, in one short casual ` +
+            `sentence, what you see and what you're about to do — like a friend narrating as they help you look, ` +
+            `e.g. "I spot it near the top left, moving forward and turning right to reach it." Keep it brief, ` +
+            `you'll narrate again after each new frame.`
           }]
         },
         tools: [{ functionDeclarations: toolDeclarations }]
@@ -254,7 +304,18 @@ async function start(){
     if (msg.serverContent?.modelTurn?.parts) {
       for (const part of msg.serverContent.modelTurn.parts) {
         if (part.text) log(part.text.trim(), 'text');
+        if (part.inlineData?.data && part.inlineData?.mimeType?.startsWith('audio/')) {
+          playAudioChunk(part.inlineData.data);
+        }
       }
+    }
+
+    if (msg.serverContent?.outputTranscription?.text) {
+      log('🔊 ' + msg.serverContent.outputTranscription.text, 'text');
+    }
+
+    if (msg.serverContent?.interrupted) {
+      stopAudioPlayback();
     }
 
     if (msg.toolCall?.functionCalls) {
@@ -310,6 +371,7 @@ function stopAll(){
   if (frameTimer) clearInterval(frameTimer);
   if (ws) ws.close();
   if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  stopAudioPlayback();
   sendStep('stop', 0);
   setStatus('idle', false);
   resetButtons();
