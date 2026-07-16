@@ -129,11 +129,13 @@ const activeSources = [];
 
 function initAudio(){
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
   nextPlayTime = audioCtx.currentTime;
 }
 
 function playAudioChunk(base64, sampleRate = 24000){
   if (!audioCtx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
   const bytes = atob(base64);
   const buf = new ArrayBuffer(bytes.length);
   const view = new Uint8Array(buf);
@@ -305,6 +307,7 @@ async function start(){
       for (const part of msg.serverContent.modelTurn.parts) {
         if (part.text) log(part.text.trim(), 'text');
         if (part.inlineData?.data && part.inlineData?.mimeType?.startsWith('audio/')) {
+          log(`(received ${part.inlineData.data.length} bytes of audio, ctx state: ${audioCtx?.state})`, 'info');
           playAudioChunk(part.inlineData.data);
         }
       }
