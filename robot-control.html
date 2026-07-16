@@ -275,7 +275,8 @@ async function start(){
     ws.send(JSON.stringify({
       setup: {
         model: `models/${model}`,
-        generationConfig: { responseModalities: ['TEXT'] },
+        generationConfig: { responseModalities: ['AUDIO'] },
+        outputAudioTranscription: {}, // gives us text captions without needing to play the audio
         systemInstruction: {
           parts: [{ text:
             `You control a small two-wheeled robot. Its camera sits roughly at table height. ` +
@@ -320,7 +321,12 @@ async function start(){
     if (msg.serverContent?.modelTurn?.parts) {
       for (const part of msg.serverContent.modelTurn.parts) {
         if (part.text) log(part.text.trim(), 'text');
+        // audio parts (part.inlineData) are intentionally ignored — not played
       }
+    }
+
+    if (msg.serverContent?.outputTranscription?.text) {
+      log(msg.serverContent.outputTranscription.text, 'text');
     }
 
     if (msg.toolCall?.functionCalls) {
