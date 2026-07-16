@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Table Scout</title>
+<style>
+  :root{
+    --bg:#0b0e0c;
+    --panel:#12160f;
+    --line:#26301f;
+    --text:#e7ede1;
+    --dim:#8a9481;
+    --accent:#8fbf3f;
+    --accent-dim:#4c6423;
+    --warn:#d97706;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+  body{display:flex;flex-direction:column;}
+
+  header{padding:14px 16px 10px;border-bottom:1px solid var(--line);}
+  header h1{font-size:15px;letter-spacing:.14em;text-transform:uppercase;
+    margin:0 0 2px;font-weight:600;color:var(--accent);}
+  header p{margin:0;font-size:12px;color:var(--dim);}
+
+  .video-wrap{position:relative;background:#000;aspect-ratio:4/3;
+    border-bottom:1px solid var(--line);overflow:hidden;}
+  video{width:100%;height:100%;object-fit:cover;display:block;}
+  .video-wrap .badge{position:absolute;top:8px;left:8px;font-family:var(--mono);
+    font-size:11px;padding:3px 7px;border-radius:3px;background:rgba(0,0,0,.55);
+    border:1px solid var(--line);}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+    background:#555;margin-right:5px;vertical-align:1px;}
+  .dot.live{background:var(--accent);box-shadow:0 0 6px var(--accent);}
+
+  .panel{padding:14px 16px;border-bottom:1px solid var(--line);}
+  label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--dim);margin-bottom:6px;}
+  input[type=text],input[type=password]{width:100%;background:var(--panel);
+    border:1px solid var(--line);color:var(--text);padding:10px;border-radius:6px;
+    font-size:14px;margin-bottom:10px;}
+  .row{display:flex;gap:10px;}
+  .row > div{flex:1;}
+
+  button{appearance:none;border:1px solid var(--accent-dim);background:var(--accent-dim);
+    color:var(--text);padding:11px;border-radius:6px;font-size:14px;font-weight:600;
+    width:100%;letter-spacing:.02em;}
+  button:active{transform:translateY(1px);}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#0b0e0c;}
+  button.stop{background:#3a1414;border-color:#7a2323;color:#f2b8b8;}
+  button:disabled{opacity:.4;}
+
+  .log{flex:1;overflow-y:auto;padding:10px 16px 90px;font-family:var(--mono);
+    font-size:12px;line-height:1.55;}
+  .log .l{margin-bottom:4px;white-space:pre-wrap;word-break:break-word;}
+  .l.call{color:var(--accent);}
+  .l.info{color:var(--dim);}
+  .l.err{color:#f28b82;}
+  .l.text{color:#cdd8c4;}
+
+  .bar{position:fixed;bottom:0;left:0;right:0;display:flex;gap:8px;
+    padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+    background:var(--bg);border-top:1px solid var(--line);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Table Scout</h1>
+  <p>Gemini Live watches through your camera and drives the robot</p>
+</header>
+
+<div class="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div class="badge"><span id="dot" class="dot"></span><span id="status">idle</span></div>
+</div>
+
+<div class="panel" id="setupPanel">
+  <label for="apiKey">Gemini API key</label>
+  <input type="password" id="apiKey" placeholder="AIza...">
+
+  <label for="robotHost">ESP32 address (from Serial Monitor)</label>
+  <input type="text" id="robotHost" placeholder="e.g. 192.168.1.42">
+
+  <label for="target">What should it look for on the table?</label>
+  <input type="text" id="target" placeholder="e.g. my red keys">
+</div>
+
+<div class="log" id="log"></div>
+
+<div class="bar">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="stop" id="stopBtn" disabled>Stop</button>
+</div>
+
+<canvas id="canvas" style="display:none"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+const logEl = $('log'), statusEl = $('status'), dotEl = $('dot');
+const video = $('video'), canvas = $('canvas');
+let ctx = canvas.getContext('2d');
+
+function log(msg, cls='info'){
+  const d = document.createElement('div');
+  d.className = 'l ' + cls;
+  d.textContent = msg;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(text, live){
+  statusEl.textContent = text;
+  dotEl.classList.toggle('live', !!live);
+}
+
+let ws = null;
+let frameTimer = null;
+let running = false;
+let planRunning = false;
+let robotHost = '';
+
+// ---- Function (tool) declaration Gemini calls: a full timed movement plan ----
+const toolDeclarations = [
+  {
+    name: 'execute_plan',
+    description:
+      'Drive the robot toward the target using a sequence of timed steps, e.g. ' +
+      '"2 seconds forward, then 1.5 seconds right, then 1 second forward". ' +
+      'Look at the whole visible table and plan the full path in one call — ' +
+      'you will see a fresh camera frame once the plan finishes, so you can correct course then.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        reasoning: { type: 'STRING', description: 'One sentence: what you see and why this path reaches it.' },
+        steps: {
+          type: 'ARRAY',
+          description: 'Ordered list of timed movements to execute back to back.',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              action: { type: 'STRING', enum: ['forward', 'backward', 'left', 'right', 'stop'] },
+              duration_seconds: { type: 'NUMBER', description: 'How long to run this step, e.g. 2 for "2 seconds".' }
+            },
+            required: ['action', 'duration_seconds']
+          }
+        }
+      },
+      required: ['steps']
+    }
+  }
+];
+
+// ---- Send one timed step to the ESP32 over WiFi ----
+// The ESP32 blocks on /drive until the motors finish, so awaiting the fetch
+// naturally paces the sequence — no extra client-side delay needed.
+async function sendStep(action, seconds){
+  const ms = Math.round(Math.max(0, seconds) * 1000);
+  const path = action === 'stop' ? '/stop' : `/drive?dir=${action}&ms=${ms}`;
+  const url = `http://${robotHost}${path}`;
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    const body = await res.text();
+    log(`→ robot ${path}`, 'call');
+    return { ok: true, robot_response: body };
+  } catch (e) {
+    log(`✗ could not reach robot at ${url}: ${e.message}`, 'err');
+    return { ok: false, error: String(e) };
+  }
+}
+
+// ---- Run a full plan step by step, in order ----
+async function executePlan(args){
+  const steps = Array.isArray(args.steps) ? args.steps : [];
+  if (args.reasoning) log('Plan: ' + args.reasoning, 'text');
+  const results = [];
+  for (const step of steps) {
+    const r = await sendStep(step.action, step.duration_seconds);
+    results.push({ action: step.action, duration_seconds: step.duration_seconds, ...r });
+    if (!r.ok) break; // stop the sequence if the robot became unreachable
+  }
+  await sendStep('stop', 0); // always end the plan stationary
+  return { result: 'plan_complete', steps_run: results };
+}
+
+// ---- Wire everything up and connect ----
+async function start(){
+  const apiKey = $('apiKey').value.trim();
+  robotHost = $('robotHost').value.trim();
+  const target = $('target').value.trim() || 'anything interesting';
+  if (!apiKey || !robotHost) { log('Enter an API key and the ESP32 address first.', 'err'); return; }
+
+  $('startBtn').disabled = true;
+  $('stopBtn').disabled = false;
+  $('setupPanel').style.opacity = '0.5';
+
+  // Camera
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: 640, height: 480 }, audio: false
+    });
+    video.srcObject = stream;
+  } catch (e) {
+    log('Camera access failed: ' + e.message, 'err');
+    return resetButtons();
+  }
+
+  setStatus('connecting…', false);
+
+  const model = 'gemini-3.1-flash-live-preview'; // check ai.google.dev/gemini-api/docs/live-api for current model names
+  const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    log('WebSocket open, sending setup…');
+    ws.send(JSON.stringify({
+      setup: {
+        model: `models/${model}`,
+        generationConfig: { responseModalities: ['TEXT'] },
+        systemInstruction: {
+          parts: [{ text:
+            `You control a small two-wheeled robot. Its camera sits roughly at table height. ` +
+            `Your goal is to find "${target}" on the table and drive the robot to it. ` +
+            `Look at the whole visible scene, judge roughly how far and in what direction the target is, ` +
+            `and call execute_plan ONCE with a full sequence of timed steps to get there — for example ` +
+            `[{action:"forward", duration_seconds:2}, {action:"right", duration_seconds:1.5}, {action:"forward", duration_seconds:1}]. ` +
+            `"left"/"right" steps rotate the robot in place; "forward"/"backward" drive straight. ` +
+            `Keep individual step durations under about 3 seconds so you don't overshoot — you'll see a ` +
+            `fresh camera frame once the plan finishes and can issue a corrected plan then. If the target ` +
+            `is already centered and close, call execute_plan with a single {action:"stop", duration_seconds:0} ` +
+            `step and say you found it.`
+          }]
+        },
+        tools: [{ functionDeclarations: toolDeclarations }]
+      }
+    }));
+  };
+
+  ws.onmessage = async (event) => {
+    const raw = typeof event.data === 'string' ? event.data : await event.data.text();
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+
+    if (msg.setupComplete) {
+      log('Setup complete. Streaming camera…');
+      setStatus('live', true);
+      running = true;
+      startFrameLoop();
+      return;
+    }
+
+    if (msg.serverContent?.modelTurn?.parts) {
+      for (const part of msg.serverContent.modelTurn.parts) {
+        if (part.text) log(part.text.trim(), 'text');
+      }
+    }
+
+    if (msg.toolCall?.functionCalls) {
+      const responses = [];
+      for (const fc of msg.toolCall.functionCalls) {
+        log(`Gemini planned: ${fc.name}(${JSON.stringify(fc.args)})`, 'call');
+        planRunning = true;
+        const result = fc.name === 'execute_plan'
+          ? await executePlan(fc.args || {})
+          : { error: 'unknown function' };
+        planRunning = false;
+        responses.push({ id: fc.id, name: fc.name, response: result });
+      }
+      ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+    }
+
+    if (msg.serverContent?.turnComplete) {
+      // model finished reasoning about this frame; frame loop keeps feeding new ones
+    }
+  };
+
+  ws.onerror = () => log('WebSocket error — check your API key and network.', 'err');
+  ws.onclose = (e) => {
+    log(`WebSocket closed (code ${e.code}).`, 'err');
+    setStatus('disconnected', false);
+    running = false;
+    resetButtons();
+  };
+}
+
+// ---- Grab a frame every ~1.5s and send it as realtime input ----
+function startFrameLoop(){
+  canvas.width = 480; canvas.height = 360;
+  frameTimer = setInterval(() => {
+    if (!running || planRunning || ws.readyState !== WebSocket.OPEN) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+    const base64 = dataUrl.split(',')[1];
+    ws.send(JSON.stringify({
+      realtimeInput: { video: { mimeType: 'image/jpeg', data: base64 } }
+    }));
+  }, 1500);
+}
+
+function resetButtons(){
+  $('startBtn').disabled = false;
+  $('stopBtn').disabled = true;
+  $('setupPanel').style.opacity = '1';
+}
+
+function stopAll(){
+  running = false;
+  if (frameTimer) clearInterval(frameTimer);
+  if (ws) ws.close();
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  sendStep('stop', 0);
+  setStatus('idle', false);
+  resetButtons();
+  log('Stopped.');
+}
+
+$('startBtn').addEventListener('click', start);
+$('stopBtn').addEventListener('click', stopAll);
+</script>
+</body>
+</html>
