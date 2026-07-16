@@ -117,7 +117,6 @@ function setStatus(text, live){
 }
 
 let ws = null;
-let frameTimer = null;
 let running = false;
 let planRunning = false;
 let robotHost = '';
@@ -296,10 +295,13 @@ async function start(){
     try { msg = JSON.parse(raw); } catch { return; }
 
     if (msg.setupComplete) {
-      log('Setup complete. Streaming camera…');
+      log('Setup complete. Sending first frame…');
       setStatus('live', true);
       running = true;
-      startFrameLoop();
+      canvas.width = 480; canvas.height = 360;
+      sendFrameTurn(`Here's the current camera view. Find "${target}" and call execute_plan with a path ` +
+        `to reach it. If you don't see it yet, briefly say what you do see and call execute_plan with a ` +
+        `single {action:"stop", duration_seconds:0} step so we can look again from here.`);
       return;
     }
 
@@ -333,6 +335,18 @@ async function start(){
         responses.push({ id: fc.id, name: fc.name, response: result });
       }
       ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+
+      // The robot just moved — give it a moment to settle, then show Gemini the new view
+      // so it can decide the next step. This is what drives the search loop forward.
+      if (running) {
+        setTimeout(() => {
+          if (running && ws.readyState === WebSocket.OPEN) {
+            sendFrameTurn(`Here's the view after that move. Continue toward "${target}" if it's not ` +
+              `centered yet, or call execute_plan with a single {action:"stop", duration_seconds:0} step ` +
+              `and say you found it if it's already centered and close.`);
+          }
+        }, 900);
+      }
     }
 
     if (msg.serverContent?.turnComplete) {
@@ -349,18 +363,25 @@ async function start(){
   };
 }
 
-// ---- Grab a frame every ~1.5s and send it as realtime input ----
-function startFrameLoop(){
-  canvas.width = 480; canvas.height = 360;
-  frameTimer = setInterval(() => {
-    if (!running || planRunning || ws.readyState !== WebSocket.OPEN) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-    const base64 = dataUrl.split(',')[1];
-    ws.send(JSON.stringify({
-      realtimeInput: { video: { mimeType: 'image/jpeg', data: base64 } }
-    }));
-  }, 1500);
+// ---- Capture the current camera frame and send it as an explicit user turn ----
+// (Gemini only responds when a turn is marked complete — continuous realtimeInput
+// frames alone never trigger a reply without an accompanying activity signal.)
+function sendFrameTurn(promptText){
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const base64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+  ws.send(JSON.stringify({
+    clientContent: {
+      turns: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/jpeg', data: base64 } },
+          { text: promptText }
+        ]
+      }],
+      turnComplete: true
+    }
+  }));
+  log('Sent camera frame to Gemini.', 'info');
 }
 
 function resetButtons(){
@@ -371,7 +392,6 @@ function resetButtons(){
 
 function stopAll(){
   running = false;
-  if (frameTimer) clearInterval(frameTimer);
   if (ws) ws.close();
   if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
   stopAudioPlayback();
