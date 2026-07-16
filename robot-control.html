@@ -138,18 +138,39 @@ function resampleFloat32(input, fromRate, toRate){
   return output;
 }
 
-// ---- Audio engine: continuous mic capture only (Gemini now replies in text, not speech) ----
+// ---- Audio engine: continuous mic capture (send) + continuous speech playback (receive) ----
+// Playback uses one continuous ScriptProcessor fed by a queue, rather than scheduling
+// a separate clip per chunk — that's what avoids the clicking/slurring at chunk seams.
 let audioCtx = null;
 let micProcessor = null;
+let playProcessor = null;
+let playQueue = [];       // Float32Array chunks awaiting playback, at audioCtx's sample rate
+let playQueueOffset = 0;
 let micEnabled = true;
 
 function initAudioEngine(stream){
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === 'suspended') audioCtx.resume();
 
-  // Mic -> downsample to 16kHz PCM16 -> stream to Gemini.
-  // Gemini's own voice-activity detection uses this continuous stream to know
-  // when you've started/finished talking — no button needed to "send" speech.
+  // --- Playback path: dequeue resampled PCM continuously ---
+  playProcessor = audioCtx.createScriptProcessor(2048, 0, 1);
+  playProcessor.onaudioprocess = (e) => {
+    const out = e.outputBuffer.getChannelData(0);
+    let filled = 0;
+    while (filled < out.length && playQueue.length > 0) {
+      const chunk = playQueue[0];
+      const remaining = chunk.length - playQueueOffset;
+      const toCopy = Math.min(remaining, out.length - filled);
+      out.set(chunk.subarray(playQueueOffset, playQueueOffset + toCopy), filled);
+      filled += toCopy;
+      playQueueOffset += toCopy;
+      if (playQueueOffset >= chunk.length) { playQueue.shift(); playQueueOffset = 0; }
+    }
+    for (; filled < out.length; filled++) out[filled] = 0; // pad silence on underrun
+  };
+  playProcessor.connect(audioCtx.destination);
+
+  // --- Capture path: mic -> downsample to 16kHz PCM16 -> stream to Gemini ---
   const micSource = audioCtx.createMediaStreamSource(stream);
   micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
   micProcessor.onaudioprocess = (e) => {
@@ -173,6 +194,25 @@ function initAudioEngine(stream){
   silentSink.gain.value = 0;
   micProcessor.connect(silentSink);
   silentSink.connect(audioCtx.destination);
+}
+
+function playAudioChunk(base64, sampleRate = 24000){
+  if (!audioCtx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const bytes = atob(base64);
+  const buf = new ArrayBuffer(bytes.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) view[i] = bytes.charCodeAt(i);
+  const pcm16 = new Int16Array(buf);
+  const float32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
+  playQueue.push(resampleFloat32(float32, sampleRate, audioCtx.sampleRate));
+}
+
+function stopAudioPlayback(){
+  // Gemini can interrupt itself (e.g. you start talking) — clear anything queued
+  playQueue = [];
+  playQueueOffset = 0;
 }
 
 // ---- Function (tool) declaration Gemini calls: a full timed movement plan ----
@@ -321,12 +361,18 @@ async function start(){
     if (msg.serverContent?.modelTurn?.parts) {
       for (const part of msg.serverContent.modelTurn.parts) {
         if (part.text) log(part.text.trim(), 'text');
-        // audio parts (part.inlineData) are intentionally ignored — not played
+        if (part.inlineData?.data && part.inlineData?.mimeType?.startsWith('audio/')) {
+          playAudioChunk(part.inlineData.data);
+        }
       }
     }
 
     if (msg.serverContent?.outputTranscription?.text) {
-      log(msg.serverContent.outputTranscription.text, 'text');
+      log('🔊 ' + msg.serverContent.outputTranscription.text, 'text');
+    }
+
+    if (msg.serverContent?.interrupted) {
+      stopAudioPlayback();
     }
 
     if (msg.toolCall?.functionCalls) {
@@ -400,6 +446,7 @@ function stopAll(){
   running = false;
   if (ws) ws.close();
   if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop()); // stops camera AND mic tracks
+  stopAudioPlayback();
   sendStep('stop', 0);
   setStatus('idle', false);
   resetButtons();
