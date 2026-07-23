@@ -182,6 +182,21 @@ async function connectBluetooth(){
     $('btStatus').textContent = `connected to ${bleDevice.name}`;
     $('btConnectBtn').textContent = '✅ Connected';
     log('Bluetooth connected to ' + bleDevice.name, 'info');
+
+    // If Gemini is already mid-conversation (connected after Start was tapped),
+    // let it know the robot just came online and run the motor test now.
+    if (running && ws && ws.readyState === WebSocket.OPEN && !planRunning) {
+      ws.send(JSON.stringify({
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text:
+            `The robot just connected over Bluetooth. Briefly let the user know you're ready to drive it now.`
+          }] }],
+          turnComplete: true
+        }
+      }));
+      log('Testing motor connection: forward 1.5s…', 'info');
+      sendStep('forward', 1.5);
+    }
   } catch (e) {
     $('btStatus').textContent = 'connection failed';
     log('Bluetooth connection failed: ' + e.message, 'err');
@@ -357,7 +372,7 @@ async function start(){
   const apiKey = $('apiKey').value.trim();
   const target = $('target').value.trim() || 'anything interesting';
   if (!apiKey) { log('Enter a Gemini API key first.', 'err'); return; }
-  if (!bleCommandChar) { log('Connect to the robot over Bluetooth first.', 'err'); return; }
+  if (!bleCommandChar) { log('Starting without a robot connection yet — Gemini will remind you to connect.', 'info'); }
 
   $('startBtn').disabled = true;
   $('stopBtn').disabled = false;
@@ -429,24 +444,31 @@ async function start(){
       canvas.width = 480; canvas.height = 360;
 
       // Text-only turn, no camera frame yet — just says hello and confirms it's ready.
+      // The wording depends on whether the robot is already connected over Bluetooth.
+      const greetingPrompt = bleCommandChar
+        ? `Say hello — one short, friendly sentence introducing yourself as ready to help, ` +
+          `something like "Hello, I'm ready to look for what you asked, or we can just chat." ` +
+          `Don't call any functions yet, just greet.`
+        : `Say hello — one short, friendly sentence introducing yourself, and mention that the robot ` +
+          `isn't connected over Bluetooth yet so you'll need the person to tap "Connect to TableScoutBot" ` +
+          `before you can drive it — but you're happy to chat in the meantime. Something like ` +
+          `"Hello! I'm ready to help, but first tap Connect to TableScoutBot so I can drive it — ` +
+          `until then we can just chat." Don't call any functions yet, just greet.`;
+
       ws.send(JSON.stringify({
         clientContent: {
-          turns: [{
-            role: 'user',
-            parts: [{ text:
-              `Say hello — one short, friendly sentence introducing yourself as ready to help, ` +
-              `something like "Hello, I'm ready to look for what you asked, or we can just chat." ` +
-              `Don't call any functions yet, just greet.`
-            }]
-          }],
+          turns: [{ role: 'user', parts: [{ text: greetingPrompt }] }],
           turnComplete: true
         }
       }));
 
       // Motor connectivity test, run directly rather than waiting on Gemini —
       // a quick forward nudge confirms the Bluetooth link to the motors is alive.
-      log('Testing motor connection: forward 1.5s…', 'info');
-      sendStep('forward', 1.5);
+      // Only makes sense once a robot is actually connected.
+      if (bleCommandChar) {
+        log('Testing motor connection: forward 1.5s…', 'info');
+        sendStep('forward', 1.5);
+      }
       return;
     }
 
