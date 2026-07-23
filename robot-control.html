@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Table Scout</title>
+<style>
+  :root{
+    --bg:#0b0e0c;
+    --panel:#12160f;
+    --line:#26301f;
+    --text:#e7ede1;
+    --dim:#8a9481;
+    --accent:#8fbf3f;
+    --accent-dim:#4c6423;
+    --warn:#d97706;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+  body{display:flex;flex-direction:column;}
+
+  header{padding:14px 16px 10px;border-bottom:1px solid var(--line);}
+  header h1{font-size:15px;letter-spacing:.14em;text-transform:uppercase;
+    margin:0 0 2px;font-weight:600;color:var(--accent);}
+  header p{margin:0;font-size:12px;color:var(--dim);}
+
+  .video-wrap{position:relative;background:#000;aspect-ratio:16/7;
+    border-bottom:1px solid var(--line);overflow:hidden;}
+  video{width:100%;height:100%;object-fit:cover;display:block;}
+  .video-wrap .badge{position:absolute;top:8px;left:8px;font-family:var(--mono);
+    font-size:11px;padding:3px 7px;border-radius:3px;background:rgba(0,0,0,.55);
+    border:1px solid var(--line);}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+    background:#555;margin-right:5px;vertical-align:1px;}
+  .dot.live{background:var(--accent);box-shadow:0 0 6px var(--accent);}
+
+  .panel{padding:14px 16px;border-bottom:1px solid var(--line);}
+  label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--dim);margin-bottom:6px;}
+  input[type=text],input[type=password]{width:100%;background:var(--panel);
+    border:1px solid var(--line);color:var(--text);padding:10px;border-radius:6px;
+    font-size:14px;margin-bottom:10px;}
+  .row{display:flex;gap:10px;}
+  .row > div{flex:1;}
+
+  button{appearance:none;border:1px solid var(--accent-dim);background:var(--accent-dim);
+    color:var(--text);padding:11px;border-radius:6px;font-size:14px;font-weight:600;
+    width:100%;letter-spacing:.02em;}
+  button:active{transform:translateY(1px);}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#0b0e0c;}
+  button.stop{background:#3a1414;border-color:#7a2323;color:#f2b8b8;}
+  button:disabled{opacity:.4;}
+
+  .log{flex:1;min-height:315px;overflow-y:auto;padding:10px 16px 90px;font-family:var(--mono);
+    font-size:12px;line-height:1.55;}
+  .log .l{margin-bottom:4px;white-space:pre-wrap;word-break:break-word;}
+  .l.call{color:var(--accent);}
+  .l.info{color:var(--dim);}
+  .l.err{color:#f28b82;}
+  .l.text{color:#cdd8c4;}
+
+  .bar{position:fixed;bottom:0;left:0;right:0;display:flex;gap:8px;
+    padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+    background:var(--bg);border-top:1px solid var(--line);}
+
+  @media (orientation: landscape) and (max-height: 500px) {
+    html,body{height:100%;overflow:hidden;}
+    body{
+      display:grid;
+      grid-template-columns: 38% 62%;
+      grid-template-rows: auto 1fr auto;
+      grid-template-areas:
+        "video header"
+        "video log"
+        "setup  bar";
+    }
+    header{grid-area:header;padding:6px 12px 4px;}
+    header h1{font-size:11px;letter-spacing:.1em;}
+    header p{font-size:9px;}
+
+    .video-wrap{grid-area:video;aspect-ratio:auto;height:100%;
+      border-right:1px solid var(--line);border-bottom:1px solid var(--line);}
+    .video-wrap .badge{font-size:9px;padding:2px 5px;}
+
+    #setupPanel{grid-area:setup;border-right:1px solid var(--line);border-bottom:none;
+      padding:6px 10px;overflow-y:auto;min-height:0;}
+    #setupPanel label{font-size:9px;margin-bottom:3px;}
+    #setupPanel input{padding:6px 8px;font-size:12px;margin-bottom:6px;}
+    #setupPanel button{padding:6px;font-size:12px;margin-bottom:4px;}
+    #btStatus{font-size:10px;margin:-2px 0 6px;}
+
+    .log{grid-area:log;min-height:0;padding:8px 12px;font-size:11px;}
+
+    .bar{grid-area:bar;position:static;padding:6px 12px;}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Table Scout</h1>
+  <p>Gemini Live watches through your camera and drives the robot</p>
+</header>
+
+<div class="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div class="badge"><span id="dot" class="dot"></span><span id="status">idle</span></div>
+  <div class="badge" id="micBadge" style="left:auto;right:8px;cursor:pointer;">🎤 on</div>
+</div>
+
+<div class="panel" id="setupPanel">
+  <label for="apiKey">Gemini API key</label>
+  <input type="password" id="apiKey" placeholder="AIza...">
+
+  <label>Robot connection</label>
+  <button id="btConnectBtn" style="margin-bottom:10px;">🔵 Connect to TableScoutBot</button>
+  <p id="btStatus" style="margin:-4px 0 10px;font-size:12px;color:var(--dim);">not connected</p>
+
+  <label for="target">What should it look for on the table?</label>
+  <input type="text" id="target" placeholder="e.g. my red keys">
+</div>
+
+<div class="log" id="log"></div>
+
+<div class="bar">
+  <button class="primary" id="startBtn">Start</button>
+  <button class="stop" id="stopBtn" disabled>Stop</button>
+</div>
+
+<canvas id="canvas" style="display:none"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+const logEl = $('log'), statusEl = $('status'), dotEl = $('dot');
+const video = $('video'), canvas = $('canvas');
+let ctx = canvas.getContext('2d');
+
+function log(msg, cls='info'){
+  const d = document.createElement('div');
+  d.className = 'l ' + cls;
+  d.textContent = msg;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(text, live){
+  statusEl.textContent = text;
+  dotEl.classList.toggle('live', !!live);
+}
+
+let ws = null;
+let running = false;
+let planRunning = false;
+let greetingPhase = false;
+// ---- Bluetooth LE connection to the ESP32 ----
+// Must match the UUIDs in esp32_robot.ino exactly.
+const BLE_SERVICE_UUID      = '12345678-1234-5678-1234-56789abcdef0';
+const BLE_COMMAND_CHAR_UUID = '12345678-1234-5678-1234-56789abcdef1';
+const BLE_STATUS_CHAR_UUID  = '12345678-1234-5678-1234-56789abcdef2';
+let bleDevice = null;
+let bleCommandChar = null;
+
+async function connectBluetooth(){
+  try {
+    $('btStatus').textContent = 'requesting device…';
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'TableScoutBot' }],
+      optionalServices: [BLE_SERVICE_UUID]
+    });
+    bleDevice.addEventListener('gattserverdisconnected', () => {
+      $('btStatus').textContent = 'disconnected';
+      $('btConnectBtn').textContent = '🔵 Connect to TableScoutBot';
+      log('Bluetooth disconnected.', 'err');
+    });
+
+    $('btStatus').textContent = 'connecting…';
+    const server = await bleDevice.gatt.connect();
+    const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+    bleCommandChar = await service.getCharacteristic(BLE_COMMAND_CHAR_UUID);
+
+    $('btStatus').textContent = `connected to ${bleDevice.name}`;
+    $('btConnectBtn').textContent = '✅ Connected';
+    log('Bluetooth connected to ' + bleDevice.name, 'info');
+  } catch (e) {
+    $('btStatus').textContent = 'connection failed';
+    log('Bluetooth connection failed: ' + e.message, 'err');
+  }
+}
+
+// ---- Shared: simple linear resampler between sample rates ----
+function resampleFloat32(input, fromRate, toRate){
+  if (fromRate === toRate) return input;
+  const ratio = toRate / fromRate;
+  const outLength = Math.round(input.length * ratio);
+  const output = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const srcPos = i / ratio;
+    const i0 = Math.floor(srcPos);
+    const i1 = Math.min(i0 + 1, input.length - 1);
+    const frac = srcPos - i0;
+    output[i] = input[i0] * (1 - frac) + input[i1] * frac;
+  }
+  return output;
+}
+
+// ---- Audio engine: continuous mic capture (send) + continuous speech playback (receive) ----
+// Playback uses one continuous ScriptProcessor fed by a queue, rather than scheduling
+// a separate clip per chunk — that's what avoids the clicking/slurring at chunk seams.
+let audioCtx = null;
+let micProcessor = null;
+let playProcessor = null;
+let playQueue = [];       // Float32Array chunks awaiting playback, at audioCtx's sample rate
+let playQueueOffset = 0;
+let micEnabled = true;
+
+function initAudioEngine(stream){
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  // --- Playback path: dequeue resampled PCM continuously ---
+  playProcessor = audioCtx.createScriptProcessor(2048, 0, 1);
+  playProcessor.onaudioprocess = (e) => {
+    const out = e.outputBuffer.getChannelData(0);
+    let filled = 0;
+    while (filled < out.length && playQueue.length > 0) {
+      const chunk = playQueue[0];
+      const remaining = chunk.length - playQueueOffset;
+      const toCopy = Math.min(remaining, out.length - filled);
+      out.set(chunk.subarray(playQueueOffset, playQueueOffset + toCopy), filled);
+      filled += toCopy;
+      playQueueOffset += toCopy;
+      if (playQueueOffset >= chunk.length) { playQueue.shift(); playQueueOffset = 0; }
+    }
+    for (; filled < out.length; filled++) out[filled] = 0; // pad silence on underrun
+  };
+  playProcessor.connect(audioCtx.destination);
+
+  // --- Capture path: mic -> downsample to 16kHz PCM16 -> stream to Gemini ---
+  const micSource = audioCtx.createMediaStreamSource(stream);
+  micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  micProcessor.onaudioprocess = (e) => {
+    if (!micEnabled || !running || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const resampled = resampleFloat32(input, audioCtx.sampleRate, 16000);
+    const int16 = new Int16Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      const s = Math.max(-1, Math.min(1, resampled[i]));
+      int16[i] = s < 0 ? s * 32768 : s * 32767;
+    }
+    const bytes = new Uint8Array(int16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    ws.send(JSON.stringify({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: btoa(binary) } } }));
+  };
+  micSource.connect(micProcessor);
+  // Route through a silent gain node: the processor must be connected to the graph
+  // to fire at all, but we don't want to echo your own mic back out the speaker.
+  const silentSink = audioCtx.createGain();
+  silentSink.gain.value = 0;
+  micProcessor.connect(silentSink);
+  silentSink.connect(audioCtx.destination);
+}
+
+function playAudioChunk(base64, sampleRate = 24000){
+  if (!audioCtx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const bytes = atob(base64);
+  const buf = new ArrayBuffer(bytes.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) view[i] = bytes.charCodeAt(i);
+  const pcm16 = new Int16Array(buf);
+  const float32 = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768;
+  playQueue.push(resampleFloat32(float32, sampleRate, audioCtx.sampleRate));
+}
+
+function stopAudioPlayback(){
+  // Gemini can interrupt itself (e.g. you start talking) — clear anything queued
+  playQueue = [];
+  playQueueOffset = 0;
+}
+
+// ---- Function (tool) declaration Gemini calls: a full timed movement plan ----
+const toolDeclarations = [
+  {
+    name: 'execute_plan',
+    description:
+      'Drive the robot toward the target using a sequence of timed steps, e.g. ' +
+      '"2 seconds forward, then 1.5 seconds right, then 1 second forward". ' +
+      'Look at the whole visible table and plan the full path in one call — ' +
+      'you will see a fresh camera frame once the plan finishes, so you can correct course then.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        reasoning: { type: 'STRING', description: 'One sentence: what you see and why this path reaches it.' },
+        steps: {
+          type: 'ARRAY',
+          description: 'Ordered list of timed movements to execute back to back.',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              action: { type: 'STRING', enum: ['forward', 'backward', 'left', 'right', 'stop'] },
+              duration_seconds: { type: 'NUMBER', description: 'How long to run this step, e.g. 2 for "2 seconds".' }
+            },
+            required: ['action', 'duration_seconds']
+          }
+        }
+      },
+      required: ['steps']
+    }
+  }
+];
+
+// ---- Send one timed step to the ESP32 over Bluetooth LE ----
+// The ESP32 blocks on /drive until the motors finish, so awaiting the fetch
+// naturally paces the sequence — no extra client-side delay needed.
+async function sendStep(action, seconds){
+  const ms = Math.round(Math.max(0, seconds) * 1000);
+  const dir = action === 'stop' ? 'stop' : action;
+  const command = `${dir}:${ms}`;
+
+  if (!bleCommandChar) {
+    log(`✗ not connected to robot — skipping ${command}`, 'err');
+    return { ok: false, error: 'not connected' };
+  }
+  try {
+    const encoder = new TextEncoder();
+    await bleCommandChar.writeValue(encoder.encode(command));
+    log(`→ robot ${command}`, 'call');
+    // The ESP32 blocks for `ms` while driving before it can accept the next
+    // write, so wait it out here too — otherwise steps would queue up too fast.
+    await new Promise(r => setTimeout(r, ms + 50));
+    return { ok: true };
+  } catch (e) {
+    log(`✗ BLE write failed: ${e.message}`, 'err');
+    return { ok: false, error: String(e) };
+  }
+}
+
+// ---- Run a full plan step by step, in order ----
+async function executePlan(args){
+  const steps = Array.isArray(args.steps) ? args.steps : [];
+  if (args.reasoning) log('Plan: ' + args.reasoning, 'text');
+  const results = [];
+  for (const step of steps) {
+    const r = await sendStep(step.action, step.duration_seconds);
+    results.push({ action: step.action, duration_seconds: step.duration_seconds, ...r });
+    if (!r.ok) break; // stop the sequence if the robot became unreachable
+  }
+  await sendStep('stop', 0); // always end the plan stationary
+  return { result: 'plan_complete', steps_run: results };
+}
+
+// ---- Wire everything up and connect ----
+async function start(){
+  const apiKey = $('apiKey').value.trim();
+  const target = $('target').value.trim() || 'anything interesting';
+  if (!apiKey) { log('Enter a Gemini API key first.', 'err'); return; }
+  if (!bleCommandChar) { log('Connect to the robot over Bluetooth first.', 'err'); return; }
+
+  $('startBtn').disabled = true;
+  $('stopBtn').disabled = false;
+  $('setupPanel').style.opacity = '0.5';
+
+  // Camera + microphone
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: 640, height: 480 },
+      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
+    });
+    video.srcObject = stream;
+  } catch (e) {
+    log('Camera/mic access failed: ' + e.message, 'err');
+    return resetButtons();
+  }
+
+  initAudioEngine(stream); // must happen inside this click handler for mobile autoplay policies
+
+  setStatus('connecting…', false);
+
+  const model = 'gemini-3.1-flash-live-preview'; // check ai.google.dev/gemini-api/docs/live-api for current model names
+  const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    log('WebSocket open, sending setup…');
+    ws.send(JSON.stringify({
+      setup: {
+        model: `models/${model}`,
+        generationConfig: { responseModalities: ['AUDIO'] },
+        outputAudioTranscription: {}, // gives us text captions without needing to play the audio
+        systemInstruction: {
+          parts: [{ text:
+            `You control a small two-wheeled robot. Its camera sits roughly at table height. ` +
+            `Your goal is to find "${target}" on the table and drive the robot to it. ` +
+            `Look at the whole visible scene, judge roughly how far and in what direction the target is, ` +
+            `and call execute_plan ONCE with a full sequence of timed steps to get there — for example ` +
+            `[{action:"forward", duration_seconds:2}, {action:"right", duration_seconds:1.5}, {action:"forward", duration_seconds:1}]. ` +
+            `"left"/"right" steps rotate the robot in place; "forward"/"backward" drive straight. ` +
+            `Keep individual step durations under about 3 seconds so you don't overshoot — you'll see a ` +
+            `fresh camera frame once the plan finishes and can issue a corrected plan then. If the target ` +
+            `is already centered and close, call execute_plan with a single {action:"stop", duration_seconds:0} ` +
+            `step and say you found it. Before calling execute_plan, briefly write, in one short casual ` +
+            `sentence, what you see and what you're about to do — like a friend narrating as they help you look, ` +
+            `e.g. "I spot it near the top left, moving forward and turning right to reach it." Keep it brief, ` +
+            `you'll narrate again after each new frame. The user can also talk to you any time through the ` +
+            `microphone — respond to them conversationally and naturally, the way you would in a normal ` +
+            `voice conversation. If they give you a new instruction (e.g. "look on the left side instead" ` +
+            `or "stop" or "try a different object"), prioritize that over continuing the current search silently.`
+          }]
+        },
+        tools: [{ functionDeclarations: toolDeclarations }]
+      }
+    }));
+  };
+
+  ws.onmessage = async (event) => {
+    const raw = typeof event.data === 'string' ? event.data : await event.data.text();
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+
+    if (msg.setupComplete) {
+      log('Setup complete. Sending greeting…');
+      setStatus('live', true);
+      running = true;
+      greetingPhase = true;
+      canvas.width = 480; canvas.height = 360;
+
+      // Text-only turn, no camera frame yet — just says hello and confirms it's ready.
+      ws.send(JSON.stringify({
+        clientContent: {
+          turns: [{
+            role: 'user',
+            parts: [{ text:
+              `Say hello — one short, friendly sentence introducing yourself as ready to help, ` +
+              `something like "Hello, I'm ready to look for what you asked, or we can just chat." ` +
+              `Don't call any functions yet, just greet.`
+            }]
+          }],
+          turnComplete: true
+        }
+      }));
+
+      // Motor connectivity test, run directly rather than waiting on Gemini —
+      // a quick forward nudge confirms the Bluetooth link to the motors is alive.
+      log('Testing motor connection: forward 1.5s…', 'info');
+      sendStep('forward', 1.5);
+      return;
+    }
+
+    if (msg.serverContent?.modelTurn?.parts) {
+      for (const part of msg.serverContent.modelTurn.parts) {
+        if (part.text) log(part.text.trim(), 'text');
+        if (part.inlineData?.data && part.inlineData?.mimeType?.startsWith('audio/')) {
+          playAudioChunk(part.inlineData.data);
+        }
+      }
+    }
+
+    if (msg.serverContent?.outputTranscription?.text) {
+      log('🔊 ' + msg.serverContent.outputTranscription.text, 'text');
+    }
+
+    if (msg.serverContent?.interrupted) {
+      stopAudioPlayback();
+    }
+
+    if (msg.toolCall?.functionCalls) {
+      const responses = [];
+      for (const fc of msg.toolCall.functionCalls) {
+        log(`Gemini planned: ${fc.name}(${JSON.stringify(fc.args)})`, 'call');
+        planRunning = true;
+        const result = fc.name === 'execute_plan'
+          ? await executePlan(fc.args || {})
+          : { error: 'unknown function' };
+        planRunning = false;
+        responses.push({ id: fc.id, name: fc.name, response: result });
+      }
+      ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+
+      // The robot just moved — give it a moment to settle, then show Gemini the new view
+      // so it can decide the next step. This is what drives the search loop forward.
+      if (running) {
+        setTimeout(() => {
+          if (running && ws.readyState === WebSocket.OPEN) {
+            sendFrameTurn(`Here's the view after that move. Continue toward "${target}" if it's not ` +
+              `centered yet, or call execute_plan with a single {action:"stop", duration_seconds:0} step ` +
+              `and say you found it if it's already centered and close.`);
+          }
+        }, 900);
+      }
+    }
+
+    if (msg.serverContent?.turnComplete) {
+      if (greetingPhase) {
+        greetingPhase = false;
+        log('Greeting done. Looking at the table…', 'info');
+        sendFrameTurn(`Here's the current camera view. Find "${target}" and call execute_plan with a path ` +
+          `to reach it. If you don't see it yet, briefly say what you do see and call execute_plan with a ` +
+          `single {action:"stop", duration_seconds:0} step so we can look again from here.`);
+      }
+      // otherwise: model finished reasoning about a frame; the post-plan setTimeout
+      // above already handles sending the next frame in that case.
+    }
+  };
+
+  ws.onerror = () => log('WebSocket error — check your API key and network.', 'err');
+  ws.onclose = (e) => {
+    log(`WebSocket closed (code ${e.code}).`, 'err');
+    setStatus('disconnected', false);
+    running = false;
+    resetButtons();
+  };
+}
+
+// ---- Capture the current camera frame and send it as an explicit user turn ----
+// (Gemini only responds when a turn is marked complete — continuous realtimeInput
+// frames alone never trigger a reply without an accompanying activity signal.)
+function sendFrameTurn(promptText){
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const base64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+  ws.send(JSON.stringify({
+    clientContent: {
+      turns: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/jpeg', data: base64 } },
+          { text: promptText }
+        ]
+      }],
+      turnComplete: true
+    }
+  }));
+  log('Sent camera frame to Gemini.', 'info');
+}
+
+function resetButtons(){
+  $('startBtn').disabled = false;
+  $('stopBtn').disabled = true;
+  $('setupPanel').style.opacity = '1';
+}
+
+function stopAll(){
+  running = false;
+  if (ws) ws.close();
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop()); // stops camera AND mic tracks
+  stopAudioPlayback();
+  sendStep('stop', 0);
+  setStatus('idle', false);
+  resetButtons();
+  log('Stopped.');
+}
+
+$('btConnectBtn').addEventListener('click', connectBluetooth);
+$('startBtn').addEventListener('click', start);
+$('stopBtn').addEventListener('click', stopAll);
+$('micBadge').addEventListener('click', () => {
+  micEnabled = !micEnabled;
+  $('micBadge').textContent = micEnabled ? '🎤 on' : '🎤 muted';
+});
+</script>
+</body>
+</html>
